@@ -43,8 +43,8 @@ async function painel(path, opts = {}) {
 }
 
 /** Chama a Hostinger. Devolve o JSON só para uso interno; nada da resposta vai para o log. */
-async function hostinger(method, body) {
-  const r = await fetch(API + SUBS_PATH, {
+async function hostinger(method, body, path = SUBS_PATH) {
+  const r = await fetch(API + path, {
     method,
     headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
@@ -108,6 +108,15 @@ async function main() {
         }
         if (!ok) throw new Error('subdomínio não apareceu na lista após a criação');
         console.log(`#${id} criado: ${fqdn}`);
+      }
+      // Sem CDN nas páginas: o endereço passa a responder direto do servidor (já com SSL) em minutos,
+      // e uma nova publicação aparece na hora. Falha aqui não impede a publicação.
+      try {
+        await hostinger('POST', undefined,
+          `/api/hosting/v1/accounts/${encodeURIComponent(USERNAME)}/websites/${encodeURIComponent(fqdn)}/cdn/disable`);
+        console.log(`#${id} CDN desligada`);
+      } catch (e) {
+        console.log(`#${id} aviso: não deu para desligar a CDN (${e.message})`);
       }
       await report(id, 'feito');
     } catch (e) {
