@@ -1,0 +1,31 @@
+name: Publicar subdomínios
+# Só schedule e workflow_dispatch (nunca pull_request / pull_request_target).
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: publicar
+  cancel-in-progress: false
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Só actions do GitHub, fixadas por SHA completo. actions/checkout v7.0.1:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # Node já vem no ubuntu-latest; sem setup-node para não depender de outra action.
+      - run: node publicar.mjs
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          QUEUE_KEY: ${{ secrets.QUEUE_KEY }}
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+          HOSTINGER_DOMAIN: ${{ vars.HOSTINGER_DOMAIN }}
+          SUBDOMAIN_DIR_PREFIX: ${{ vars.SUBDOMAIN_DIR_PREFIX }}
+          HOSTINGER_ADD_DOMAIN_PATH: ${{ vars.HOSTINGER_ADD_DOMAIN_PATH }}
+          HOSTINGER_SSL_PATH: ${{ vars.HOSTINGER_SSL_PATH }}
+          DRY_RUN: ${{ vars.DRY_RUN }}
