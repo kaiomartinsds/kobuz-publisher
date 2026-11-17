@@ -1,26 +1,23 @@
 // Kobuz Sites — publicador de subdomínios (roda no GitHub Actions do repositório PÚBLICO).
-// Lê a fila do painel, valida o slug de novo e cria o subdomínio + SSL na Hostinger.
+// Lê a fila do painel, valida o slug de novo e cria o subdomínio na Hostinger (o SSL é automático).
 // O token da Hostinger existe só nos secrets do GitHub; nunca no servidor.
-//
-// Secrets: APP_URL, QUEUE_KEY, HOSTINGER_API_TOKEN
 // Logs: nunca imprimir token nem corpo de resposta da API (repo público = logs públicos).
-// Variables: HOSTINGER_DOMAIN (myapplabs.com.br), SUBDOMAIN_DIR_PREFIX (ex.: public_html/p/),
-//            HOSTINGER_ADD_DOMAIN_PATH, HOSTINGER_SSL_PATH, DRY_RUN ("1" = só mostra, não cria)
-// (SUBDOMAIN_DIR_PREFIX padrão: p/)
+//
+// Secrets:   APP_URL, QUEUE_KEY, HOSTINGER_API_TOKEN
+// Variables: HOSTINGER_USERNAME (u873242798), HOSTINGER_DOMAIN (myapplabs.com.br),
+//            SUBDOMAIN_DIR_PREFIX (p/  -> relativo ao public_html), DRY_RUN ("1" = só mostra, não cria)
 
-const env = (k, d = '') => (process.env[k] ?? d).trim();
+const env = (k, d = '') => (process.env[k] ?? '').trim() || d;
 const APP_URL = env('APP_URL').replace(/\/$/, '');
 const QUEUE_KEY = env('QUEUE_KEY');
 const TOKEN = env('HOSTINGER_API_TOKEN');
+const USERNAME = env('HOSTINGER_USERNAME', 'u873242798');
 const DOMAIN = env('HOSTINGER_DOMAIN', 'myapplabs.com.br');
-// Pasta do subdomínio RELATIVA AO public_html (confirmado na Hostinger): 'p/' -> public_html/p/<slug>.
 const DIR_PREFIX = env('SUBDOMAIN_DIR_PREFIX', 'p/');
-const API = 'https://developers.hostinger.com';
-// Caminhos REST da Hostinger: CONFIRMAR em developers.hostinger.com antes de desligar o DRY_RUN.
-// Equivalem às operações hosting_websites_add-domain e hosting_ssl_install.
-const ADD_PATH = env('HOSTINGER_ADD_DOMAIN_PATH', '/api/hosting/v1/websites/{domain}/domains');
-const SSL_PATH = env('HOSTINGER_SSL_PATH', '');
 const DRY_RUN = env('DRY_RUN', '1') !== '0';
+const API = 'https://developers.hostinger.com';
+// Endpoint oficial (developers.hostinger.com, "Create website subdomain" / "List website subdomains").
+const SUBS_PATH = `/api/hosting/v1/accounts/${encodeURIComponent(USERNAME)}/websites/${encodeURIComponent(DOMAIN)}/subdomains`;
 
 // Mesmas regras do painel (app/lib/render.php). Se mudar lá, mudar aqui.
 const RESERVED = new Set(['www', 'app', 'api', 'admin', 'sites', 'site', 'mail', 'email', 'smtp', 'imap', 'pop',
@@ -45,15 +42,30 @@ async function painel(path, opts = {}) {
   return r.json();
 }
 
-async function hostinger(method, path, body) {
-  const r = await fetch(API + path, {
+/** Chama a Hostinger. Devolve o JSON só para uso interno; nada da resposta vai para o log. */
+async function hostinger(method, body) {
+  const r = await fetch(API + SUBS_PATH, {
     method,
     headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
-  await r.body?.cancel(); // corpo descartado: nunca vai para log nem para o painel
+  const text = await r.text();
   if (!r.ok) throw new Error(`hostinger ${method}: HTTP ${r.status}`);
+  try { return JSON.parse(text); } catch { return null; }
 }
+
+/** Mapa prefixo -> root_directory dos subdomínios já existentes. */
+async function listSubdomains() {
+  const list = await hostinger('GET');
+  const map = new Map();
+  for (const s of Array.isArray(list) ? list : []) {
+    if (s && typeof s.subdomain === 'string') map.set(s.subdomain, String(s.root_directory || ''));
+  }
+  return map;
+}
+
+const expectedRoot = (slug) => `/public_html/${DIR_PREFIX}${slug}`;
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 async function report(id, status, erro = '') {
   await painel(`/api/fila/${id}`, { method: 'POST', body: JSON.stringify({ status, erro: String(erro).slice(0, 450) }) });
@@ -61,8 +73,13 @@ async function report(id, status, erro = '') {
 
 async function main() {
   if (!APP_URL.startsWith('https://') || QUEUE_KEY.length < 32) throw new Error('APP_URL/QUEUE_KEY ausentes');
+  if (!DRY_RUN && TOKEN.length < 20) throw new Error('HOSTINGER_API_TOKEN ausente');
+  if (!/^[a-z0-9/_-]*\/$/.test(DIR_PREFIX)) throw new Error('SUBDOMAIN_DIR_PREFIX inválido');
   const { itens = [] } = await painel('/api/fila');
   console.log(`Fila: ${itens.length} item(ns). DRY_RUN=${DRY_RUN}`);
+  if (itens.length === 0) return;
+
+  let existing = DRY_RUN ? new Map() : await listSubdomains();
   for (const { id, slug } of itens) {
     if (!validSlug(slug)) {
       console.log(`#${id} recusado: slug inválido`);
@@ -71,18 +88,28 @@ async function main() {
     }
     const fqdn = `${slug}.${DOMAIN}`;
     if (DRY_RUN) {
-      console.log(`#${id} [dry-run] criaria ${fqdn} -> ${DIR_PREFIX}${slug}`);
+      console.log(`#${id} [dry-run] criaria ${fqdn} -> public_html/${DIR_PREFIX}${slug}`);
       continue;
     }
     try {
-      await hostinger('POST', ADD_PATH.replace('{domain}', DOMAIN), {
-        type: 'subdomain', name: slug, directory: `${DIR_PREFIX}${slug}`,
-      });
-      if (SSL_PATH) {
-        try { await hostinger('POST', SSL_PATH.replace('{domain}', fqdn)); } catch (e) { console.log(`#${id} SSL: ${e.message}`); }
+      if (existing.has(slug)) {
+        if (!existing.get(slug).endsWith(expectedRoot(slug))) {
+          throw new Error('subdomínio já existe apontando para outra pasta');
+        }
+        console.log(`#${id} já existia: ${fqdn}`);
+      } else {
+        await hostinger('POST', { subdomain: slug, directory: `${DIR_PREFIX}${slug}` });
+        // A criação é assíncrona: confere na lista antes de avisar o painel.
+        let ok = false;
+        for (let t = 0; t < 6 && !ok; t++) {
+          await sleep(5000);
+          existing = await listSubdomains();
+          ok = existing.has(slug) && existing.get(slug).endsWith(expectedRoot(slug));
+        }
+        if (!ok) throw new Error('subdomínio não apareceu na lista após a criação');
+        console.log(`#${id} criado: ${fqdn}`);
       }
       await report(id, 'feito');
-      console.log(`#${id} ok: ${fqdn}`);
     } catch (e) {
       console.log(`#${id} erro: ${e.message}`);
       await report(id, 'erro', e.message);
