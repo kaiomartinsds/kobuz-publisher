@@ -111,13 +111,21 @@ async function main() {
       }
       // Sem CDN nas páginas: o endereço passa a responder direto do servidor (já com SSL) em minutos,
       // e uma nova publicação aparece na hora. Falha aqui não impede a publicação.
-      try {
-        await hostinger('POST', undefined,
-          `/api/hosting/v1/accounts/${encodeURIComponent(USERNAME)}/websites/${encodeURIComponent(fqdn)}/cdn/disable`);
-        console.log(`#${id} CDN desligada`);
-      } catch (e) {
-        console.log(`#${id} aviso: não deu para desligar a CDN (${e.message})`);
+      // Num subdomínio recém-criado a Hostinger pode religar a CDN logo depois: confere e repete.
+      const cdnBase = `/api/hosting/v1/accounts/${encodeURIComponent(USERNAME)}/websites/${encodeURIComponent(fqdn)}/cdn`;
+      let cdnOff = false;
+      for (let t = 0; t < 4 && !cdnOff; t++) {
+        try {
+          await hostinger('POST', undefined, `${cdnBase}/disable`);
+          await sleep(20000);
+          const st = JSON.stringify(await hostinger('GET', undefined, `${cdnBase}/status`) ?? {});
+          cdnOff = !/"(is_)?enabled"\s*:\s*true|"status"\s*:\s*"(active|enabled|on)"/i.test(st);
+        } catch (e) {
+          console.log(`#${id} aviso: CDN (${e.message})`);
+          await sleep(10000);
+        }
       }
+      console.log(`#${id} CDN ${cdnOff ? 'desligada e conferida' : 'NÃO confirmada como desligada'}`);
       await report(id, 'feito');
     } catch (e) {
       console.log(`#${id} erro: ${e.message}`);
