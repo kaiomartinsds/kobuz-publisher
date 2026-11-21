@@ -64,6 +64,16 @@ async function listSubdomains() {
   return map;
 }
 
+/** Lê o status da CDN como objeto (sem procurar texto). Resposta inesperada conta como "ligada", para tentar de novo. */
+function cdnEnabled(res) {
+  const o = res && typeof res === 'object' ? (res.data && typeof res.data === 'object' ? res.data : res) : null;
+  if (!o) return true;
+  if (typeof o.is_enabled === 'boolean') return o.is_enabled;
+  if (typeof o.enabled === 'boolean') return o.enabled;
+  if (typeof o.status === 'string') return ['active', 'enabled', 'on'].includes(o.status.toLowerCase());
+  return true;
+}
+
 const expectedRoot = (slug) => `/public_html/${DIR_PREFIX}${slug}`;
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
@@ -80,13 +90,34 @@ async function main() {
   if (itens.length === 0) return;
 
   let existing = DRY_RUN ? new Map() : await listSubdomains();
-  for (const { id, slug } of itens) {
+  for (const { id, slug, acao } of itens) {
     if (!validSlug(slug)) {
       console.log(`#${id} recusado: slug inválido`);
       await report(id, 'erro', 'slug recusado pelo publicador');
       continue;
     }
     const fqdn = `${slug}.${DOMAIN}`;
+    if (acao === 'remover') {
+      // Site excluído pelo dono: só remove se o subdomínio aponta para a pasta das páginas (p/<slug>).
+      if (DRY_RUN) {
+        console.log(`#${id} [dry-run] removeria ${fqdn}`);
+        continue;
+      }
+      try {
+        if (existing.has(slug)) {
+          if (!existing.get(slug).endsWith(expectedRoot(slug))) throw new Error('subdomínio aponta para outra pasta; não removido');
+          await hostinger('DELETE', undefined, `${SUBS_PATH}/${encodeURIComponent(slug)}`);
+          console.log(`#${id} removido: ${fqdn}`);
+        } else {
+          console.log(`#${id} já não existia: ${fqdn}`);
+        }
+        await report(id, 'feito');
+      } catch (e) {
+        console.log(`#${id} erro ao remover: ${e.message}`);
+        await report(id, 'erro', e.message);
+      }
+      continue;
+    }
     if (DRY_RUN) {
       console.log(`#${id} [dry-run] criaria ${fqdn} -> public_html/${DIR_PREFIX}${slug}`);
       continue;
@@ -118,8 +149,7 @@ async function main() {
         try {
           await hostinger('POST', undefined, `${cdnBase}/disable`);
           await sleep(20000);
-          const st = JSON.stringify(await hostinger('GET', undefined, `${cdnBase}/status`) ?? {});
-          cdnOff = !/"(is_)?enabled"\s*:\s*true|"status"\s*:\s*"(active|enabled|on)"/i.test(st);
+          cdnOff = !cdnEnabled(await hostinger('GET', undefined, `${cdnBase}/status`));
         } catch (e) {
           console.log(`#${id} aviso: CDN (${e.message})`);
           await sleep(10000);
